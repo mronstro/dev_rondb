@@ -1,5 +1,6 @@
 /*
    Copyright (c) 2005, 2020, Oracle and/or its affiliates.
+   Copyright (c) 2021, iClaustron AB and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -390,7 +391,7 @@ Dbtup::update_extent_pos(EmulatedJamBuffer* jamBuf,
 }
 
 void
-Dbtup::restart_setup_page(Ptr<Fragrecord> fragPtr,
+Dbtup::restart_setup_page(FragrecordPtr fragPtr,
                           Disk_alloc_info& alloc,
                           PagePtr pagePtr,
                           Int32 estimate)
@@ -559,7 +560,7 @@ Dbtup::restart_setup_page(Ptr<Fragrecord> fragPtr,
 
 int
 Dbtup::disk_page_prealloc(Signal* signal, 
-			  Ptr<Fragrecord> fragPtr,
+                          FragrecordPtr fragPtr,
 			  Local_key* key, Uint32 sz)
 {
   int err;
@@ -954,9 +955,9 @@ Dbtup::disk_page_prealloc_callback(Signal* signal,
   Ptr<GlobalPage> gpage;
   m_global_page_pool.getPtr(gpage, page_id);
 
-  Ptr<Fragrecord> fragPtr;
+  FragrecordPtr fragPtr;
   fragPtr.i= req.p->m_frag_ptr_i;
-  ptrCheckGuard(fragPtr, cnoOfFragrec, fragrecord);
+  c_fragment_pool.getPtr(fragPtr);
 
   PagePtr pagePtr;
   pagePtr.i = gpage.i;
@@ -1150,9 +1151,9 @@ Dbtup::disk_page_prealloc_initial_callback(Signal*signal,
   pagePtr.i = gpage.i;
   pagePtr.p = reinterpret_cast<Page*>(gpage.p);
 
-  Ptr<Fragrecord> fragPtr;
+  FragrecordPtr fragPtr;
   fragPtr.i= req.p->m_frag_ptr_i;
-  ptrCheckGuard(fragPtr, cnoOfFragrec, fragrecord);
+  c_fragment_pool.getPtr(fragPtr);
 
   Ptr<Tablerec> tabPtr;
   tabPtr.i = fragPtr.p->fragTableId;
@@ -1282,7 +1283,7 @@ Dbtup::disk_page_set_dirty(PagePtr pagePtr)
   tabPtr.i= pagePtr.p->m_table_id;
   ptrCheckGuard(tabPtr, cnoOfTablerec, tablerec);
   
-  Ptr<Fragrecord> fragPtr;
+  FragrecordPtr fragPtr;
   getFragmentrec(fragPtr, pagePtr.p->m_fragment_id, tabPtr.p);
   
   Disk_alloc_info& alloc= fragPtr.p->m_disk_alloc_info;
@@ -1362,7 +1363,7 @@ Dbtup::disk_page_unmap_callback(Uint32 when,
   tabPtr.i= pagePtr.p->m_table_id;
   ptrCheckGuard(tabPtr, cnoOfTablerec, tablerec);
   
-  Ptr<Fragrecord> fragPtr;
+  FragrecordPtr fragPtr;
   getFragmentrec(fragPtr, pagePtr.p->m_fragment_id, tabPtr.p);
 
   DEB_PGMAN_IO(("(%u)unmap page: tab(%u,%u), page(%u,%u):%u,"
@@ -1729,7 +1730,7 @@ Dbtup::disk_page_abort_prealloc_callback(Signal* signal,
 
   c_lqh->decrement_usage_count_for_table(tabPtr.i);
 
-  Ptr<Fragrecord> fragPtr;
+  FragrecordPtr fragPtr;
   getFragmentrec(fragPtr, pagePtr.p->m_fragment_id, tabPtr.p);
 
   disk_page_abort_prealloc_callback_1(signal, fragPtr.p, pagePtr, sz);

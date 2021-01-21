@@ -1,5 +1,6 @@
 /*
    Copyright (c) 2003, 2020, Oracle and/or its affiliates.
+   Copyright (c) 2021, iClaustron AB and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -802,20 +803,17 @@ void Dbtup::prepare_tab_pointers_acc(Uint32 table_id, Uint32 frag_id)
 
 void Dbtup::prepareTUPKEYREQ(Uint32 page_id,
                              Uint32 page_idx,
-                             Uint32 frag_id)
+                             Uint32 fragPtrI)
 {
   FragrecordPtr fragptr;
   TablerecPtr tabptr;
 
-  fragptr.i = frag_id;
-  const Uint32 RnoOfFragrec= cnoOfFragrec;
+  fragptr.i = fragPtrI;
+  c_fragment_pool.getPtr(fragptr);
   const Uint32 RnoOfTablerec= cnoOfTablerec;
-  Fragrecord * Rfragrecord = fragrecord;
   Tablerec * Rtablerec = tablerec;
 
   jamEntryDebug();
-  ndbrequire(fragptr.i < RnoOfFragrec);
-  ptrAss(fragptr, Rfragrecord);
   tabptr.i = fragptr.p->fragTableId;
   ptrCheckGuard(tabptr, RnoOfTablerec, Rtablerec);
   prepare_tabptr = tabptr;
@@ -929,7 +927,7 @@ bool Dbtup::execTUPKEYREQ(Signal* signal,
      ndbassert(prepare_orig_local_key.m_page_idx == key.m_page_idx);
      ndbassert(prepare_fragptr.i == tupKeyReq->fragPtr);
      FragrecordPtr fragPtr = prepare_fragptr;
-     ptrCheckGuard(fragPtr, cnoOfFragrec, fragrecord);
+     c_fragment_pool.getPtr(fragPtr);
      ndbassert(prepare_fragptr.p == fragPtr.p);
    }
 #endif
@@ -2440,7 +2438,7 @@ Dbtup::prepare_initial_insert(KeyReqStruct *req_struct,
 
 int Dbtup::handleInsertReq(Signal* signal,
                            Ptr<Operationrec> regOperPtr,
-                           Ptr<Fragrecord> fragPtr,
+                           FragrecordPtr fragPtr,
                            Tablerec* regTabPtr,
                            KeyReqStruct *req_struct,
                            Local_key ** accminupdateptr,
@@ -3075,7 +3073,7 @@ error:
 int
 Dbtup::handleRefreshReq(Signal* signal,
                         Ptr<Operationrec> regOperPtr,
-                        Ptr<Fragrecord>  regFragPtr,
+                        FragrecordPtr regFragPtr,
                         Tablerec* regTabPtr,
                         KeyReqStruct *req_struct,
                         bool disk)
@@ -5242,7 +5240,7 @@ Dbtup::validate_page(Tablerec* regTabPtr, Var_page* p)
     if((fragPtr.i = regTabPtr->fragrec[F]) == RNIL)
       continue;
 
-    ptrCheckGuard(fragPtr, cnoOfFragrec, fragrecord);
+    c_fragment_pool.getPtr(fragPtr);
     for(Uint32 P= 0; P<fragPtr.p->noOfPages; P++)
     {
       Uint32 real= getRealpid(fragPtr.p, P);
@@ -5523,14 +5521,14 @@ Dbtup::optimize_var_part(KeyReqStruct* req_struct,
 }
 
 int
-Dbtup::nr_update_gci(Uint32 fragPtrI,
+Dbtup::nr_update_gci(Uint64 fragPtrI,
                      const Local_key* key,
                      Uint32 gci,
                      bool tuple_exists)
 {
   FragrecordPtr fragPtr;
   fragPtr.i= fragPtrI;
-  ptrCheckGuard(fragPtr, cnoOfFragrec, fragrecord);
+  c_fragment_pool.getPtr(fragPtr);
   TablerecPtr tablePtr;
   tablePtr.i= fragPtr.p->fragTableId;
   ptrCheckGuard(tablePtr, cnoOfTablerec, tablerec);
@@ -5585,13 +5583,13 @@ Dbtup::nr_update_gci(Uint32 fragPtrI,
 }
 
 int
-Dbtup::nr_read_pk(Uint32 fragPtrI, 
+Dbtup::nr_read_pk(Uint64 fragPtrI, 
 		  const Local_key* key, Uint32* dst, bool& copy)
 {
   
   FragrecordPtr fragPtr;
   fragPtr.i= fragPtrI;
-  ptrCheckGuard(fragPtr, cnoOfFragrec, fragrecord);
+  c_fragment_pool.getPtr(fragPtr);
   TablerecPtr tablePtr;
   tablePtr.i= fragPtr.p->fragTableId;
   ptrCheckGuard(tablePtr, cnoOfTablerec, tablerec);
@@ -5692,11 +5690,11 @@ Dbtup::nr_read_pk(Uint32 fragPtrI,
 
 int
 Dbtup::nr_delete(Signal* signal, Uint32 senderData,
-		 Uint32 fragPtrI, const Local_key* key, Uint32 gci)
+		 Uint64 fragPtrI, const Local_key* key, Uint32 gci)
 {
   FragrecordPtr fragPtr;
   fragPtr.i= fragPtrI;
-  ptrCheckGuard(fragPtr, cnoOfFragrec, fragrecord);
+  c_fragment_pool.getPtr(fragPtr);
   TablerecPtr tablePtr;
   tablePtr.i= fragPtr.p->fragTableId;
   ptrCheckGuard(tablePtr, cnoOfTablerec, tablerec);
@@ -5965,9 +5963,9 @@ Dbtup::nr_delete_page_callback(Signal* signal,
   op.m_disk_ref.m_file_no = pagePtr.p->m_file_no;
   c_lqh->get_nr_op_info(&op, page_id);
 
-  Ptr<Fragrecord> fragPtr;
+  FragrecordPtr fragPtr;
   fragPtr.i= op.m_tup_frag_ptr_i;
-  ptrCheckGuard(fragPtr, cnoOfFragrec, fragrecord);
+  c_fragment_pool.getPtr(fragPtr);
 
   Ptr<Tablerec> tablePtr;
   tablePtr.i = fragPtr.p->fragTableId;
@@ -6015,9 +6013,9 @@ Dbtup::nr_delete_log_buffer_callback(Signal* signal,
   op.m_ptr_i = userpointer;
   c_lqh->get_nr_op_info(&op, RNIL);
   
-  Ptr<Fragrecord> fragPtr;
+  FragrecordPtr fragPtr;
   fragPtr.i= op.m_tup_frag_ptr_i;
-  ptrCheckGuard(fragPtr, cnoOfFragrec, fragrecord);
+  c_fragment_pool.getPtr(fragPtr);
 
   Ptr<Tablerec> tablePtr;
   tablePtr.i = fragPtr.p->fragTableId;

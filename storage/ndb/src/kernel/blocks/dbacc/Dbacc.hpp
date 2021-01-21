@@ -1,5 +1,6 @@
 /*
    Copyright (c) 2003, 2020, Oracle and/or its affiliates.
+   Copyright (c) 2021, iClaustron AB and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -39,6 +40,8 @@
 #include "signaldata/AccKeyReq.hpp"
 #include "TransientPool.hpp"
 #include "TransientSlotPool.hpp"
+#include <Intrusive64List.hpp>
+#include <RWPool64.hpp>
 
 #include <EventLogger.hpp>
 extern EventLogger * g_eventLogger;
@@ -394,6 +397,10 @@ typedef LocalDLCFifoList<Page8_pool, IA_Page8> LocalContainerPageList;
 /* --------------------------------------------------------------------------------- */
 #define NUM_ACC_FRAGMENT_MUTEXES 4
 struct Fragmentrec {
+  Fragmentrec() {}
+  Uint64 tupFragptr;
+  Uint32 m_magic;
+  Uint32 nextPool;
   NdbMutex acc_frag_mutex[NUM_ACC_FRAGMENT_MUTEXES];
   Uint32 scan[MAX_PARALLEL_SCANS_PER_FRAG];
   Uint16 activeScanMask;
@@ -405,7 +412,6 @@ struct Fragmentrec {
     Uint32 fragmentid;
     Uint32 myfid;
   };
-  Uint32 tupFragptr;
   Uint32 roothashcheck;
   Uint32 m_commit_count;
   State rootState;
@@ -475,11 +481,6 @@ struct Fragmentrec {
   Uint32 minloadfactor;
   Int64 slack;
   Int64 slackCheck;
-
-//-----------------------------------------------------------------------------
-// nextfreefrag is the next free fragment if linked into a free list
-//-----------------------------------------------------------------------------
-  Uint32 nextfreefrag;
 
 //-----------------------------------------------------------------------------
 // Fragment State, mostly applicable during LCP and restore
@@ -682,9 +683,14 @@ public:
   bool enough_valid_bits(LHBits16 const& reduced_hash_value) const;
 };
 
-  typedef Ptr<Fragmentrec> FragmentrecPtr;
-  void set_tup_fragptr(Uint32 fragptr, Uint32 tup_fragptr);
+  typedef Ptr64<Fragmentrec> FragmentrecPtr;
+  FragmentrecPtr fragrecptr;
+  typedef RecordPool64<RWPool64<Fragmentrec> > Fragment_pool;
+  Fragment_pool c_fragment_pool;
+  void set_tup_fragptr(Uint64 fragptr, Uint64 tup_fragptr);
 
+  RSS_OP_COUNTER(cnoOfAllocatedFragrec);
+  RSS_OP_SNAPSHOT(cnoOfAllocatedFragrec);
 
 struct Operationrec {
   STATIC_CONST( TYPE_ID = RT_DBACC_OPERATION);
@@ -726,6 +732,7 @@ struct Operationrec {
   {
   }
 
+  Uint64 fragptr;
   /**
    * Next ptr (used in list)
    */
@@ -740,7 +747,6 @@ struct Operationrec {
   Uint32 elementPage;
   Uint32 elementPointer;
   Uint32 fid;
-  Uint32 fragptr;
   LHBits32 hashValue;
   Uint32 nextLockOwnerOp;
   Uint32 nextParallelQue;
@@ -800,7 +806,7 @@ struct ScanRec {
 
   ScanRec() :
     m_magic(Magic::make(TYPE_ID)),
-    activeLocalFrag(RNIL),
+    activeLocalFrag(RNIL64),
     nextBucketIndex(0),
     scanFirstActiveOp(RNIL),
     scanFirstLockedOp(RNIL),
@@ -816,7 +822,7 @@ struct ScanRec {
   {
   }
 
-  Uint32 activeLocalFrag;
+  Uint64 activeLocalFrag;
   Uint32 nextBucketIndex;
   /**
    * Next ptr (used in list)
@@ -868,7 +874,7 @@ public:
 
 struct Tabrec {
   Uint32 fragholder[MAX_FRAG_PER_LQH];
-  Uint32 fragptrholder[MAX_FRAG_PER_LQH];
+  Uint64 fragptrholder[MAX_FRAG_PER_LQH];
   Uint32 tabUserPtr;
   BlockReference tabUserRef;
   Uint32 tabUserGsn;
@@ -886,11 +892,11 @@ public:
   class Dblqh* c_lqh;
 
   // Get the size of the logical to physical page map, in bytes.
-  Uint32 getL2PMapAllocBytes(Uint32 fragId) const;
+  Uint32 getL2PMapAllocBytes(Uint64 fragPtrI) const;
   void removerow(Uint32 op, const Local_key*);
 
   // Get the size of the linear hash map in bytes.
-  Uint64 getLinHashByteSize(Uint32 fragId) const;
+  Uint64 getLinHashByteSize(Uint64 fragPtrI) const;
 
   bool checkOpPendingAbort(Uint32 accConnectPtr) const;
 
@@ -939,7 +945,7 @@ private:
   void initFragPageZero(FragmentrecPtr, Page8Ptr) const;
   void initFragGeneral(FragmentrecPtr) const;
   void verifyFragCorrect(FragmentrecPtr regFragPtr) const;
-  void releaseFragResources(Signal* signal, Uint32 fragIndex);
+  void releaseFragResources(Signal* signal, Uint32 tableId, Uint32 fragId);
   void releaseRootFragRecord(Signal* signal, RootfragmentrecPtr rootPtr) const;
   void releaseRootFragResources(Signal* signal, Uint32 tableId);
   void releaseDirResources(Signal* signal);
@@ -952,13 +958,13 @@ private:
   void initScanFragmentPart();
   Uint32 checkScanExpand(Uint32 splitBucket);
   Uint32 checkScanShrink(Uint32 sourceBucket, Uint32 destBucket);
-  void initialiseFragRec();
   void initialiseFsConnectionRec(Signal* signal) const;
   void initialiseFsOpRec(Signal* signal) const;
   void initialisePageRec();
   void initialiseRootfragRec(Signal* signal) const;
   void initialiseTableRec();
-  bool addfragtotab(Uint32 rootIndex, Uint32 fragId) const;
+  bool addfragtotab(Uint64 rootIndex, Uint32 fragId) const;
+  void drop_fragment_from_table(Uint32 tableId, Uint32 fragId);
   void initOpRec(const AccKeyReq* signal, Uint32 siglen) const;
   void sendAcckeyconf(Signal* signal) const;
   Uint32 getNoParallelTransaction(const Operationrec*) const;
@@ -973,11 +979,14 @@ private:
 #else
   bool validate_lock_queue(OperationrecPtr) const { return true;}
 #endif
+
+#if 0
   /**
     Return true if the sum of per fragment pages counts matches the total
     page count (cnoOfAllocatedPages). Used for consistency checks. 
    */
   bool validatePageCount() const;
+#endif
 public:  
   void startNext(Signal* signal, OperationrecPtr lastOp);
   
@@ -1127,7 +1136,7 @@ private:
                    EmulatedJamBuffer *jamBuf);
   void releasePage_lock(Page8Ptr rpPageptr);
   void seizeDirectory(Signal* signal) const;
-  void seizeFragrec();
+  bool seizeFragrec();
   void seizeFsConnectRec(Signal* signal) const;
   void seizeFsOpRec(Signal* signal) const;
   Uint32 seizePage(Page8Ptr& spPageptr,
@@ -1171,23 +1180,12 @@ private:
 
 public:
   // Variables
-/* --------------------------------------------------------------------------------- */
-/* DIRECTORY                                                                         */
-/* --------------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* DIRECTORY                                                                 */
+/* ------------------------------------------------------------------------- */
   DynArr256Pool*  directoryPoolPtr;
   DynArr256Pool   directoryPool;
-/* --------------------------------------------------------------------------------- */
-/* FRAGMENTREC. ALL INFORMATION ABOUT FRAMENT AND HASH TABLE IS SAVED IN FRAGMENT    */
-/*         REC  A POINTER TO FRAGMENT RECORD IS SAVED IN ROOTFRAGMENTREC FRAGMENT    */
-/* --------------------------------------------------------------------------------- */
-
-  Fragmentrec *fragmentrec;
-  FragmentrecPtr fragrecptr;
-  Uint32 cfirstfreefrag;
-  Uint32 cfragmentsize;
-  RSS_OP_COUNTER(cnoOfFreeFragrec);
-  RSS_OP_SNAPSHOT(cnoOfFreeFragrec);
-
+  
 private:
 
 /* --------------------------------------------------------------------------------- */
@@ -1234,6 +1232,7 @@ private:
   Uint32 c_copy_frag_oprec;
 
 public:
+  Uint64 getFragPtrI(Uint32 tableId, Uint32 fragId);
   static Uint64 getTransactionMemoryNeed(
     const Uint32 ldm_instance_count,
     const ndb_mgm_configuration_iterator * mgm_cfg,
@@ -1247,7 +1246,8 @@ public:
   Operationrec* get_operation_ptr(Uint32 i);
   void execACCKEYREQ(Signal *signal,
                      Uint32 opPtrI,
-                     Operationrec *opPtrP);
+                     Operationrec *opPtrP,
+                     Uint64 fragPtrI);
   void execACC_COMMITREQ(Signal *signal,
                          Uint32 opPtrI,
                          Operationrec *opPtrP);
@@ -1270,7 +1270,7 @@ public:
     return m_lqh_block;
   }
 
-  bool check_expand_shrink_ongoing(Uint32 fragPtrI);
+  bool check_expand_shrink_ongoing(Uint64 fragPtrI);
   Operationrec* getOperationPtrP(Uint32 opPtrI);
 
   bool acquire_frag_mutex_get(Fragmentrec *fragPtrP,
@@ -1337,11 +1337,10 @@ public:
 };
 
 inline bool
-Dbacc::check_expand_shrink_ongoing(Uint32 fragPtrI)
+Dbacc::check_expand_shrink_ongoing(Uint64 fragPtrI)
 {
   fragrecptr.i = fragPtrI;
-  ndbrequire(fragrecptr.i < cfragmentsize);
-  ptrAss(fragrecptr, fragmentrec);
+  c_fragment_pool.getPtr(fragrecptr);
   return fragrecptr.p->expandOrShrinkQueued;
 }
 

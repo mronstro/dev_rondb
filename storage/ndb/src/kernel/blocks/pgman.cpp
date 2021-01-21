@@ -1,5 +1,6 @@
 /*
    Copyright (c) 2005, 2020, Oracle and/or its affiliates.
+   Copyright (c) 2020, 2021, iClaustron AB and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -357,6 +358,15 @@ Pgman::execREAD_CONFIG_REQ(Signal* signal)
   if (page_buffer > 0)
   {
     jam();
+    // how many page entries per buffer page
+    Uint32 entries = 0;
+    ndb_mgm_get_int_parameter(p, CFG_DB_DISK_PAGE_BUFFER_ENTRIES, &entries);
+    ndbout << "pgman: page buffer entries = " << entries << endl;
+    if (entries > 0) // should be
+    {
+      // param name refers to unbound entries ending up on stack
+      m_param.m_lirs_stack_mult = entries;
+    }
     if (isNdbMtLqh())
     {
       jam();
@@ -378,26 +388,20 @@ Pgman::execREAD_CONFIG_REQ(Signal* signal)
       if (page_buffer < min_buffer)
         page_buffer = min_buffer;
     }
+    Uint64 page_size = GLOBAL_PAGE_SIZE +
+                       entries * sizeof(Page_entry) +
+                       2 * entries * sizeof(Uint32);
     // convert to pages
-    Uint32 page_cnt = Uint32((page_buffer + GLOBAL_PAGE_SIZE - 1) / GLOBAL_PAGE_SIZE);
+    Uint32 page_cnt = Uint32((page_buffer + page_size - 1) /
+                             page_size);
 
     if (ERROR_INSERTED(11009))
     {
       page_cnt = 25;
       ndbout_c("Setting page_cnt = %u", page_cnt);
     }
-
     m_param.m_max_pages = page_cnt;
 
-    // how many page entries per buffer pages
-    Uint32 entries = 0;
-    ndb_mgm_get_int_parameter(p, CFG_DB_DISK_PAGE_BUFFER_ENTRIES, &entries);
-    ndbout << "pgman: page buffer entries = " << entries << endl;
-    if (entries > 0) // should be
-    {
-      // param name refers to unbound entries ending up on stack
-      m_param.m_lirs_stack_mult = entries;
-    }
     Uint32 pool_size = m_param.m_lirs_stack_mult * page_cnt;
     m_page_entry_pool.setSize(pool_size);
     m_page_hashlist.setSize(pool_size);
@@ -411,13 +415,10 @@ Pgman::execREAD_CONFIG_REQ(Signal* signal)
   m_page_request_pool.wo_pool_init(RT_PGMAN_PAGE_REQUEST, pc);
   m_file_entry_pool.init(RT_PGMAN_FILE, pc);
   
-  Uint32 noFragments = 0;
-  ndbrequire(!ndb_mgm_get_int_parameter(p, CFG_LQH_FRAG, &noFragments));
-  m_fragmentRecordPool.setSize(noFragments);
-  m_fragmentRecordHash.setSize(noFragments);
+  m_fragmentRecordPool.init(RT_PGMAN_FRAGMENTS, pc);
+  m_fragmentRecordHash.setSize(32768);
 
-  Uint32 noTables = 0;
-  ndbrequire(!ndb_mgm_get_int_parameter(p, CFG_LQH_TABLE, &noTables));
+  Uint32 noTables = NDB_MAX_TABLES;
   m_tableRecordPool.setSize(noTables);
 
   for (Uint32 i = 0; i < noTables; i++)
@@ -1710,9 +1711,8 @@ Pgman::execSYNC_PAGE_CACHE_CONF(Signal *signal)
 {
   SyncPageCacheConf* conf = (SyncPageCacheConf*)signal->getDataPtr();
   FragmentRecordPtr fragPtr;
-
-  fragPtr.i = conf->senderData;
-  m_fragmentRecordPool.getPtr(fragPtr);
+  FragmentRecord key(*this, conf->tableId, conf->fragmentId);
+  ndbrequire(m_fragmentRecordHash.find(fragPtr, key));
   if (!get_next_ordered_fragment(fragPtr))
   {
     /**
@@ -1832,7 +1832,7 @@ void Pgman::execSYNC_PAGE_CACHE_REQ(Signal *signal)
     finish_lcp(signal, NULL);
     return;
   }
-  ndbrequire(fragPtr.i != RNIL);
+  ndbrequire(fragPtr.i != RNIL64);
   ndbrequire(!m_sync_extent_pages_ongoing);
   ndbrequire(m_lcp_outstanding == 0);
   ndbrequire(!m_extra_pgman);
@@ -2134,7 +2134,7 @@ Pgman::check_restart_lcp(Signal *signal, bool check_prepare_lcp)
        * an LCP on.
        */
       get_first_ordered_fragment(fragPtr);
-      if (fragPtr.i == RNIL)
+      if (fragPtr.i == RNIL64)
       {
         jam();
         /* No disk data tables exists */
@@ -5873,7 +5873,7 @@ Pgman::add_fragment(Uint32 tableId, Uint32 fragmentId)
   FragmentRecordPtr fragPtr;
   FragmentRecordPtr check;
   m_fragmentRecordPool.seize(fragPtr);
-  if (fragPtr.i == RNIL)
+  if (fragPtr.i == RNIL64)
   {
     jam();
     return 1;
@@ -6004,14 +6004,14 @@ Pgman::get_next_ordered_fragment(FragmentRecordPtr & fragPtr)
        * It is only used for prepare LCP handling.
        */
       fragPtr.p = 0;
-      fragPtr.i = RNIL;
+      fragPtr.i = RNIL64;
       return false;
     }
     return true;
   }
   jam();
   fragPtr.p = 0;
-  fragPtr.i = RNIL;
+  fragPtr.i = RNIL64;
   return false;
 }
 
@@ -6033,7 +6033,7 @@ Pgman::get_first_ordered_fragment(FragmentRecordPtr & fragPtr)
   }
   jam();
   fragPtr.p = 0;
-  fragPtr.i = RNIL;
+  fragPtr.i = RNIL64;
   return false;
 }
 
@@ -6060,7 +6060,7 @@ Pgman::drop_fragment(Uint32 tableId, Uint32 fragmentId)
   m_fragmentRecordHash.find(fragPtr, key);
   TableRecordPtr tabPtr;
   m_tableRecordPool.getPtr(tabPtr, tableId);
-  if (fragPtr.i != RNIL)
+  if (fragPtr.i != RNIL64)
   {
     jam();
     Uint32 list = get_ordered_list_from_table_id(tableId);

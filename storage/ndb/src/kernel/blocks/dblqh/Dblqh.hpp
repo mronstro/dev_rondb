@@ -1,5 +1,6 @@
 /*
    Copyright (c) 2003, 2020, Oracle and/or its affiliates.
+   Copyright (c) 2021, iClaustron AB and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -542,8 +543,8 @@ public:
       TUP_ATTR_WAIT = 7,
       TUX_ATTR_WAIT = 9
     };
+    Uint64 fragmentPtr;
     AddFragStatus addfragStatus;
-    UintR fragmentPtr;
     UintR nextAddfragrec;
     UintR accConnectptr;
     UintR tupConnectptr;
@@ -571,6 +572,7 @@ public:
 
     ScanRecord() :
       m_magic(Magic::make(TYPE_ID)),
+      fragPtrI(RNIL64),
       scan_acc_index(0),
       scan_acc_segments(0),
       nextHash(RNIL),
@@ -587,6 +589,7 @@ public:
     {
     }
 
+    Uint64 fragPtrI;
     enum ScanState {
       SCAN_FREE = 0,
       WAIT_NEXT_SCAN_COPY = 1,
@@ -663,7 +666,6 @@ public:
      *   in which case scanTcrec->fragmentptr is different
      */
     Uint32 scan_check_lcp_stop;
-    Uint32 fragPtrI;
     UintR scanStoredProcId;
     UintR scanTcrec;
     BlockReference scanApiBlockref;
@@ -728,6 +730,22 @@ public:
 #define LOCK_READ_SPIN_TIME 30
 #define LOCK_WRITE_SPIN_TIME 40
 
+  struct MapFragRecord {
+    STATIC_CONST( TYPE_ID = RT_DBLQH_MAP_FRAGMENT);
+    MapFragRecord() :
+      m_magic(Magic::make(TYPE_ID)),
+      fragPtrI(RNIL64)
+    {}
+
+    Uint32 m_magic;
+    Uint32 nextPool;
+    Uint64 fragPtrI;
+  };
+  STATIC_CONST(DBLQH_MAP_FRAGMENT_RECORD_TRANSIENT_POOL_INDEX = 3);
+  typedef Ptr<MapFragRecord> MapFragRecordPtr;
+  typedef TransientPool<MapFragRecord> MapFragRecord_pool;
+  MapFragRecord_pool c_map_fragment_pool;
+
   struct Fragrecord {
     Fragrecord()
     {
@@ -740,6 +758,7 @@ public:
       m_spin_exclusive_waiters = 0;
       m_write_key_locked = false;
       m_exclusive_locked = false;
+      fragStatus = FREE;
     }
 
     NdbMutex frag_mutex;
@@ -817,6 +836,7 @@ public:
       LCP_STATE_TRUE = 0,
       LCP_STATE_FALSE = 1
     };
+    Uint32 m_magic;
     /**
      *        Last GCI for executing the fragment log in this phase.
      */
@@ -851,7 +871,7 @@ public:
     /**
      *       The fragment pointers in ACC
      */
-    UintR accFragptr;
+    Uint64 accFragptr;
     /**
      *       The EXEC_SR variables are used to keep track of which fragments  
      *       that are interested in being executed as part of executing the    
@@ -883,8 +903,8 @@ public:
     /**
      *       The fragment pointers in TUP and TUX
      */
-    UintR tupFragptr;
-    UintR tuxFragptr;
+    Uint64 tupFragptr;
+    Uint64 tuxFragptr;
 
     /**
      *       This variable keeps track of how many operations that are 
@@ -938,10 +958,15 @@ public:
      *       records.              
      */
     union {
-      Uint32 nextPool;
-      Uint32 nextList;
+      Uint64 nextPool;
+      Uint64 nextList;
     };
-    Uint32 prevList;
+    Uint64 prevList;
+    /**
+     *       For ordered index fragment, i-value of corresponding
+     *       fragment in primary table.
+     */
+    Uint64 tableFragptr;
     
     /**
      *       The newest GCI that has been committed on fragment             
@@ -1041,11 +1066,6 @@ public:
      *       Table type.
      */
     Uint8 tableType;
-    /**
-     *       For ordered index fragment, i-value of corresponding
-     *       fragment in primary table.
-     */
-    UintR tableFragptr;
     /**
      *       The GCI when the table was created
      */
@@ -1178,10 +1198,11 @@ public:
      */
     Uint8 m_local_lcp_instance_started;
   };
-  typedef Ptr<Fragrecord> FragrecordPtr;
-  typedef ArrayPool<Fragrecord> Fragrecord_pool;
-  typedef SLList<Fragrecord_pool> Fragrecord_list;
-  typedef DLFifoList<Fragrecord_pool> Fragrecord_fifo;
+  typedef Ptr64<Fragrecord> FragrecordPtr;
+  typedef RecordPool64<RWPool64<Fragrecord> > Fragrecord_pool;
+  typedef DLFifo64List<Fragrecord_pool> Fragrecord_fifo;
+  RSS_OP_COUNTER(cnoOfAllocatedFragrec);
+  RSS_OP_SNAPSHOT(cnoOfAllocatedFragrec);
   
   /* $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ */
   /* $$$$$$$                GLOBAL CHECKPOINT RECORD                  $$$$$$ */
@@ -1314,7 +1335,7 @@ public:
     bool m_wait_early_lcp_synch;
 
     struct FragOrd {
-      Uint32 fragPtrI;
+      Uint64 fragPtrI;
       LcpFragOrd lcpFragOrd;
     };
     FragOrd currentPrepareFragment;
@@ -2503,7 +2524,7 @@ public:
       ,TABLE_READ_ONLY = 9
     };
     
-    UintR fragrec[MAX_FRAG_PER_LQH];
+    Uint64 fragrec[MAX_FRAG_PER_LQH];
     Uint16 fragid[MAX_FRAG_PER_LQH];
     /**
      * Status of the table 
@@ -2595,6 +2616,7 @@ public:
 
     TcConnectionrec() :
       m_magic(Magic::make(TYPE_ID)),
+      fragmentptr(RNIL64),
       accConnectrec(RNIL),
       tupConnectrec(RNIL),
       nextTcConnectrec(RNIL),
@@ -2684,6 +2706,7 @@ public:
     ~TcConnectionrec()
     {
     }
+    Uint64 fragmentptr;
     UintR accConnectrec;
     UintR tupConnectrec;
     Uint32 nextTcConnectrec;
@@ -2700,7 +2723,6 @@ public:
     UintR currReclenAi;
     UintR currTupAiLen;
     UintR fragmentid;
-    UintR fragmentptr;
     UintR gci_hi;
     UintR gci_lo;
     UintR hashValue;
@@ -2918,7 +2940,7 @@ public:
   void write_local_sysfile_restart_complete_done(Signal*);
 
   void write_local_sysfile(Signal*, Uint32, Uint32);
-  void sendLCP_FRAG_ORD(Signal*, Uint32 fragPtrI);
+  void sendLCP_FRAG_ORD(Signal*, Uint64 fragPtrI);
 
 public:
   Dblqh(Block_context& ctx,
@@ -3326,8 +3348,13 @@ private:
   bool remove_from_prepare_log_queue(Signal *signal,
                                      TcConnectionrecPtr tcPtr);
   bool getFragmentrec(Uint32 fragId);
+public:
+  void getIndexTupFragPtrI(Uint32 tableId,
+                           Uint32 fragId,
+                           Uint64 & tupIndexFragPtrI,
+                           Uint64 & tupTableFragPtrI);
+private:
   void initialiseAddfragrec(Signal* signal);
-  void initialiseFragrec(Signal* signal);
   void initialiseGcprec(Signal* signal);
   void initialiseLcpRec(Signal* signal);
   void initialiseLfo(Signal* signal);
@@ -3431,6 +3458,7 @@ private:
   void sendLqhTransconf(Signal* signal,
                         LqhTransConf::OperationStatus,
                         TcConnectionrecPtr);
+  void complete_startExecSr(Signal*);
   void startExecSr(Signal* signal);
   void startNextExecSr(Signal* signal);
   void startTimeSupervision(Signal* signal, LogPartRecord*);
@@ -3530,7 +3558,7 @@ private:
                      LogPartRecord *logPartPtrP);
   void srPhase3Comp(Signal* signal);
   void srLogLimits(Signal* signal);
-  void srGciLimits(Signal* signal);
+  void srGciLimits(Signal* signal, Uint32, Uint32);
   void srPhase3Start(Signal* signal);
   void checkStartCompletedLab(Signal* signal);
   void continueAbortLab(Signal* signal, TcConnectionrecPtr);
@@ -3582,7 +3610,7 @@ private:
   void completeLcpRoundLab(Signal* signal, Uint32 lcpId);
   void continueAfterLogAbortWriteLab(Signal* signal, TcConnectionrecPtr);
   void sendAttrinfoLab(Signal* signal);
-  void sendExecConf(Signal* signal);
+  void sendExecConf(Signal* signal, Uint32, Uint32);
   void execSr(Signal* signal);
   void srFourthComp(Signal* signal);
   void timeSup(Signal* signal);
@@ -3828,8 +3856,8 @@ private:
   Uint32 m_backup_ptr;
   bool m_node_restart_lcp_second_phase_started;
   bool m_node_restart_first_local_lcp_started;
-  Uint32 m_first_activate_fragment_ptr_i;
-  Uint32 m_second_activate_fragment_ptr_i;
+  Uint64 m_first_activate_fragment_ptr_i;
+  Uint64 m_second_activate_fragment_ptr_i;
   Uint32 m_curr_lcp_id;
   Uint32 m_curr_local_lcp_id;
   Uint32 m_next_local_lcp_id;
@@ -3921,8 +3949,8 @@ private:
 public:
   struct Nr_op_info
   {
+    Uint64 m_tup_frag_ptr_i;
     Uint32 m_ptr_i;
-    Uint32 m_tup_frag_ptr_i;
     Uint32 m_gci_hi;
     Uint32 m_gci_lo;
     Uint32 m_page_id;
@@ -4218,7 +4246,7 @@ private:
 /*THESE VARIABLES ARE USED TO KEEP TRACK OF ALL ACTIVE COPY FRAGMENTS IN LQH.*/
 /* ------------------------------------------------------------------------- */
   Uint8 cnoActiveCopy;
-  UintR cactiveCopy[4];
+  Uint64 cactiveCopy[4];
 /* ------------------------------------------------------------------------- */
 /* These variable is used to keep track of what time we have reported so far */
 /* in the TIME_SIGNAL handling.                                              */
@@ -4662,7 +4690,7 @@ private:
   void sendPoolShrink(Uint32 pool_index);
   void shrinkTransientPools(Uint32 pool_index);
 
-  static const Uint32 c_transient_pool_count = 3;
+  static const Uint32 c_transient_pool_count = 4;
   TransientFastSlotPool* c_transient_pools[c_transient_pool_count];
   Bitmask<1> c_transient_pools_shrinking;
 

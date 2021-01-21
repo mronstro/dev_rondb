@@ -1,5 +1,6 @@
 /*
    Copyright (c) 2006, 2020, Oracle and/or its affiliates. All rights reserved.
+   Copyright (c) 2020, iClaustron AB and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -502,7 +503,8 @@ void
 Resource_limits::dump() const
 {
   printf("ri: global "
-         "max_page: %u free_reserved: %u in_use: %u allocated: %u spare: %u: untaken: %u: lent: %u: borrowed: %u\n",
+         "max_page: %u free_reserved: %u in_use: %u allocated: %u"
+         " spare: %u: untaken: %u: lent: %u: borrowed: %u\n",
          m_max_page,
          m_free_reserved,
          m_in_use,
@@ -524,7 +526,8 @@ Resource_limits::dump() const
     {
       continue;
     }
-    printf("ri: %u id: %u min: %u curr: %u max: %u lent: %u borrowed: %u spare: %u spare_pct: %u\n",
+    printf("ri: %u id: %u min: %u curr: %u max: %u lent: %u borrowed: %u"
+           " spare: %u spare_pct: %u\n",
            i,
            m_limit[i].m_resource_id,
            m_limit[i].m_min,
@@ -785,7 +788,9 @@ cmp_chunk(const void * chunk_vptr_1, const void * chunk_vptr_2)
 }
 
 bool
-Ndbd_mem_manager::init(Uint32 *watchCounter, Uint32 max_pages , bool alloc_less_memory)
+Ndbd_mem_manager::init(Uint32 *watchCounter,
+                       Uint32 max_pages,
+                       bool alloc_less_memory)
 {
   assert(m_base_page == 0);
   assert(max_pages > 0);
@@ -1306,7 +1311,8 @@ Ndbd_mem_manager::alloc(AllocZone zone,
     {
       if (unlikely(m_dump_on_alloc_fail))
       {
-        printf("Page allocation failed in %s: zone=%u pages=%u (at least %u)\n",
+        printf("Page allocation failed in %s: zone=%u pages=%u"
+               " (at least %u)\n",
                __func__,
                zone,
                save,
@@ -1355,13 +1361,14 @@ Ndbd_mem_manager::alloc_impl(Uint32 zone,
 	clear(start, start+cnt-1);
       }
       * ret = start;
-      assert(m_resource_limits.get_in_use() + cnt <= m_resource_limits.get_allocated());
+      assert(m_resource_limits.get_in_use() + cnt <=
+             m_resource_limits.get_allocated());
       return;
     }
   }
 
   /**
-   * Could not find in quaranteed list...
+   * Could not find in guaranteed list...
    *   search in other lists...
    */
 
@@ -1386,7 +1393,8 @@ Ndbd_mem_manager::alloc_impl(Uint32 zone,
 
       * ret = start;
       * pages = sz;
-      assert(m_resource_limits.get_in_use() + sz <= m_resource_limits.get_allocated());
+      assert(m_resource_limits.get_in_use() + sz <=
+             m_resource_limits.get_allocated());
       return;
     }
   }
@@ -1548,7 +1556,8 @@ Ndbd_mem_manager::alloc_page(Uint32 type,
     {
       if (unlikely(m_dump_on_alloc_fail))
       {
-        printf("Page allocation failed in %s: no free reserved resource page.\n",
+        printf("Page allocation failed in %s: no free reserved resource"
+               " page.\n",
                __func__);
         dump(true);
       }
@@ -1560,7 +1569,8 @@ Ndbd_mem_manager::alloc_page(Uint32 type,
   alloc(zone, i, &cnt, min);
   if (likely(cnt))
   {
-    const Uint32 spare_taken = m_resource_limits.post_alloc_resource_pages(idx, cnt);
+    const Uint32 spare_taken =
+      m_resource_limits.post_alloc_resource_pages(idx, cnt);
     if (spare_taken > 0)
     {
       require(spare_taken == cnt);
@@ -1568,7 +1578,8 @@ Ndbd_mem_manager::alloc_page(Uint32 type,
       m_resource_limits.check();
       if (unlikely(m_dump_on_alloc_fail))
       {
-        printf("Page allocation failed in %s: no free non-spare resource page.\n",
+        printf("Page allocation failed in %s: no free non-spare resource"
+               " page.\n",
                __func__);
         dump(true);
       }
@@ -1689,7 +1700,8 @@ Ndbd_mem_manager::alloc_pages(Uint32 type,
       *cnt = 0;
       if (unlikely(m_dump_on_alloc_fail))
       {
-        printf("Page allocation failed in %s: not enough free resource pages.\n",
+        printf("Page allocation failed in %s: not enough free resource"
+               " pages.\n",
                __func__);
         dump(true);
       }

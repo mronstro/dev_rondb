@@ -415,6 +415,17 @@ void Dblqh::initRecords(const ndb_mgm_configuration_iterator *mgm_cfg)
     refresh_watch_dog();
   }
 
+  c_map_fragment_pool.init(
+    MapFragRecord::TYPE_ID,
+    pc,
+    0,
+    UINT32_MAX);
+
+  while (c_map_fragment_pool.startup())
+  {
+    refresh_watch_dog();
+  }
+
   Uint32 reserveScanRecs = 0;
   ndbrequire(!ndb_mgm_get_int_parameter(mgm_cfg,
                             CFG_LQH_RESERVED_SCAN_RECORDS,
@@ -792,13 +803,17 @@ Dblqh::Dblqh(Block_context& ctx,
   m_num_copy_restores_active = 0;
   m_current_ldm_instance = 0;
 
+  RSS_OP_COUNTER_INIT(cnoOfAllocatedFragrec);
+
   c_transient_pools[DBLQH_OPERATION_RECORD_TRANSIENT_POOL_INDEX] =
     &tcConnect_pool;
   c_transient_pools[DBLQH_SCAN_RECORD_TRANSIENT_POOL_INDEX] =
     &c_scanRecordPool;
   c_transient_pools[DBLQH_COMMIT_ACK_MARKER_TRANSIENT_POOL_INDEX] =
     &m_commitAckMarkerPool;
-  NDB_STATIC_ASSERT(c_transient_pool_count == 3);
+  c_transient_pools[DBLQH_MAP_FRAGMENT_RECORD_TRANSIENT_POOL_INDEX] =
+    &c_map_fragment_pool;
+  NDB_STATIC_ASSERT(c_transient_pool_count == 4);
   c_transient_pools_shrinking.clear();
 }//Dblqh::Dblqh()
 

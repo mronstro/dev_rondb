@@ -1,5 +1,6 @@
 /*
    Copyright (c) 2003, 2020, Oracle and/or its affiliates.
+   Copyright (c) 2021, iClaustron AB and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -69,7 +70,6 @@ Uint64 Dbacc::getTransactionMemoryNeed(
 void Dbacc::initData() 
 {
   ctablesize = ZTABLESIZE;
-  cfragmentsize = ZFRAGMENTSIZE;
 
   Pool_context pc;
   pc.m_block = this;
@@ -83,11 +83,12 @@ void Dbacc::initData()
     directoryPoolPtr = 0;
   }
 
-  fragmentrec = 0;
   tabrec = 0;
 
   void* ptr = m_ctx.m_mm.get_memroot();
   c_page_pool.set((Page32*)ptr, (Uint32)~0);
+
+  c_fragment_pool.init(RT_DBACC_FRAGMENT, pc);
 
   c_allow_use_of_spare_pages = false;
   cfreeopRec = RNIL;
@@ -95,7 +96,7 @@ void Dbacc::initData()
   cnoOfAllocatedPagesMax = cnoOfAllocatedPages = cpageCount = 0;
   // Records with constant sizes
 
-  RSS_OP_COUNTER_INIT(cnoOfFreeFragrec);
+  RSS_OP_COUNTER_INIT(cnoOfAllocatedFragrec);
 
 }//Dbacc::initData()
 
@@ -119,12 +120,8 @@ void Dbacc::initRecords(const ndb_mgm_configuration_iterator *mgm_cfg)
 
   if (m_is_query_block)
   {
-    cfragmentsize = 0;
     ctablesize = 0;
   }
-  fragmentrec = (Fragmentrec*)allocRecord("Fragmentrec",
-					  sizeof(Fragmentrec), 
-					  cfragmentsize);
 
   tabrec = (Tabrec*)allocRecord("Tabrec",
 				sizeof(Tabrec),
@@ -248,10 +245,6 @@ Dbacc::Dbacc(Block_context& ctx,
 
 Dbacc::~Dbacc() 
 {
-  deallocRecord((void **)&fragmentrec, "Fragmentrec",
-		sizeof(Fragmentrec), 
-		cfragmentsize);
-  
   deallocRecord((void **)&tabrec, "Tabrec",
 		sizeof(Tabrec),
 		ctablesize);

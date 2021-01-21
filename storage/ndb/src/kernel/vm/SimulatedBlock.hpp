@@ -51,7 +51,6 @@
 
 #include "IntrusiveList.hpp"
 #include "DLHashTable.hpp"
-#include "WOPool.hpp"
 #include "RWPool.hpp"
 #include "Callback.hpp"
 #include "SafeCounter.hpp"

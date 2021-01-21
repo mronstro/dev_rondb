@@ -1,5 +1,6 @@
 /*
    Copyright (c) 2004, 2020, Oracle and/or its affiliates.
+   Copyright (c) 2021, iClaustron AB and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -263,6 +264,9 @@
 
 #define CFG_DB_NUM_CPUS               676
 #define CFG_DB_AUTO_THREAD_CONFIG     677
+
+#define CFG_DB_SCHEMA_MEM             685
+#define CFG_DB_REPLICATION_MEM        686
 
 #define CFG_NODE_ARBIT_RANK           200
 #define CFG_NODE_ARBIT_DELAY          201

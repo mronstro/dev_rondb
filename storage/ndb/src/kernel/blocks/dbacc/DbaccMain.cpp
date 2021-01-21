@@ -1,4 +1,5 @@
 /* Copyright (c) 2003, 2020, Oracle and/or its affiliates.
+   Copyright (c) 2021, iClaustron AB and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -244,8 +245,9 @@ void Dbacc::execCONTINUEB(Signal* signal)
   case ZREL_FRAG:
     {
       jam();
-      Uint32 fragIndex = signal->theData[1];
-      releaseFragResources(signal, fragIndex);
+      Uint32 fragId = signal->theData[1];
+      Uint32 tableId = signal->theData[2];
+      releaseFragResources(signal, tableId, fragId);
       break;
     }
   case ZREL_DIR:
@@ -428,7 +430,6 @@ void Dbacc::initialiseRecordsLab(Signal* signal,
     break;
   case 6:
     jam();
-    initialiseFragRec();
     break;
   case 7:
     jam();
@@ -478,39 +479,12 @@ void Dbacc::execREAD_CONFIG_REQ(Signal* signal)
     m_ctx.m_config.getOwnConfigIterator();
   ndbrequire(p != 0);
   
-  ndbrequire(!ndb_mgm_get_int_parameter(p, CFG_ACC_FRAGMENT, &cfragmentsize));
   ndbrequire(!ndb_mgm_get_int_parameter(p, CFG_ACC_TABLE, &ctablesize));
   initRecords(p);
 
   initialiseRecordsLab(signal, 0, ref, senderData);
   return;
 }
-
-/* --------------------------------------------------------------------------------- */
-/* INITIALISE_FRAG_REC                                                               */
-/*              INITIALATES THE FRAGMENT RECORDS.                                    */
-/* --------------------------------------------------------------------------------- */
-void Dbacc::initialiseFragRec()
-{
-  if (m_is_query_block)
-  {
-    cfirstfreefrag = RNIL;
-    return;
-  }
-  FragmentrecPtr regFragPtr;
-  ndbrequire(cfragmentsize > 0);
-  for (regFragPtr.i = 0; regFragPtr.i < cfragmentsize; regFragPtr.i++) {
-    jam();
-    refresh_watch_dog();
-    ptrAss(regFragPtr, fragmentrec);
-    initFragGeneral(regFragPtr);
-    regFragPtr.p->nextfreefrag = regFragPtr.i + 1;
-  }//for
-  regFragPtr.i = cfragmentsize - 1;
-  ptrAss(regFragPtr, fragmentrec);
-  regFragPtr.p->nextfreefrag = RNIL;
-  cfirstfreefrag = 0;
-}//Dbacc::initialiseFragRec()
 
 /* --------------------------------------------------------------------------------- */
 /* INITIALISE_PAGE_REC                                                               */
@@ -539,15 +513,14 @@ void Dbacc::initialiseTableRec()
     ptrAss(tabptr, tabrec);
     for (Uint32 i = 0; i < NDB_ARRAY_SIZE(tabptr.p->fragholder); i++) {
       tabptr.p->fragholder[i] = RNIL;
-      tabptr.p->fragptrholder[i] = RNIL;
+      tabptr.p->fragptrholder[i] = RNIL64;
     }//for
   }//for
 }//Dbacc::initialiseTableRec()
 
-void Dbacc::set_tup_fragptr(Uint32 fragptr, Uint32 tup_fragptr)
+void Dbacc::set_tup_fragptr(Uint64 fragptr, Uint64 tup_fragptr)
 {
-  fragrecptr.i = fragptr;
-  ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+  c_fragment_pool.getPtr(fragrecptr, fragptr);
   fragrecptr.p->tupFragptr = tup_fragptr;
 }
 
@@ -589,12 +562,6 @@ void Dbacc::execACCFRAGREQ(Signal* signal)
   ptrCheckGuard(tabptr, ctablesize, tabrec);
   ndbrequire((req->reqInfo & 0xF) == ZADDFRAG);
   ndbrequire(!getfragmentrec(fragrecptr, req->fragId));
-  if (cfirstfreefrag == RNIL) {
-    jam();
-    addFragRefuse(signal, ZFULL_FRAGRECORD_ERROR);
-    return;
-  }//if
-
   ndbassert(req->localKeyLen == 1);
   if (req->localKeyLen != 1)
   {
@@ -602,7 +569,12 @@ void Dbacc::execACCFRAGREQ(Signal* signal)
     addFragRefuse(signal, ZLOCAL_KEY_LENGTH_ERROR);
     return;
   }
-  seizeFragrec();
+  if (!seizeFragrec())
+  {
+    jam();
+    addFragRefuse(signal, ZFULL_FRAGRECORD_ERROR);
+    return;
+  }//if
   initFragGeneral(fragrecptr);
   initFragAdd(signal, fragrecptr);
 
@@ -643,7 +615,7 @@ void Dbacc::execACCFRAGREQ(Signal* signal)
   conf->rootFragPtr = RNIL;
   conf->fragId[0] = fragrecptr.p->fragmentid;
   conf->fragId[1] = RNIL;
-  conf->fragPtr[0] = fragrecptr.i;
+  conf->fragPtr[0] = RNIL;
   conf->fragPtr[1] = RNIL;
   conf->rootHashCheck = fragrecptr.p->roothashcheck;
   sendSignal(retRef, GSN_ACCFRAGCONF, signal, AccFragConf::SignalLength, JBB);
@@ -699,8 +671,7 @@ Dbacc::execDROP_FRAG_REQ(Signal* signal){
     if (tabPtr.p->fragholder[i] == req->fragId)
     {
       jam();
-      tabPtr.p->fragholder[i] = RNIL;
-      releaseFragResources(signal, tabPtr.p->fragptrholder[i]);
+      releaseFragResources(signal, tabPtr.i, tabPtr.p->fragholder[i]);
       return;
     }//if
   }//for
@@ -723,8 +694,7 @@ void Dbacc::releaseRootFragResources(Signal* signal, Uint32 tableId)
       if (tabPtr.p->fragholder[i] != RNIL)
       {
         jam();
-        tabPtr.p->fragholder[i] = RNIL;
-        releaseFragResources(signal, tabPtr.p->fragptrholder[i]);
+        releaseFragResources(signal, tabPtr.i, tabPtr.p->fragholder[i]);
         return;
       }
     }
@@ -756,12 +726,12 @@ void Dbacc::releaseRootFragResources(Signal* signal, Uint32 tableId)
   tabPtr.p->tabUserGsn = 0;
 }//Dbacc::releaseRootFragResources()
 
-void Dbacc::releaseFragResources(Signal* signal, Uint32 fragIndex)
+void Dbacc::releaseFragResources(Signal* signal, Uint32 tableId, Uint32 fragId)
 {
   jam();
   FragmentrecPtr regFragPtr;
-  regFragPtr.i = fragIndex;
-  ptrCheckGuard(regFragPtr, cfragmentsize, fragmentrec);
+  regFragPtr.i = getFragPtrI(tableId, fragId);
+  c_fragment_pool.getPtr(regFragPtr);
   verifyFragCorrect(regFragPtr);
 
   if (regFragPtr.p->expandOrShrinkQueued)
@@ -779,8 +749,9 @@ void Dbacc::releaseFragResources(Signal* signal, Uint32 fragIndex)
      * They need a valid Fragmentrec.
      */
     signal->theData[0] = ZREL_FRAG;
-    signal->theData[1] = regFragPtr.i;
-    sendSignal(reference(), GSN_CONTINUEB, signal, 2, JBB);
+    signal->theData[1] = regFragPtr.p->fragmentid;
+    signal->theData[2] = regFragPtr.p->myTableId;
+    sendSignal(reference(), GSN_CONTINUEB, signal, 3, JBB);
     return;
   }
 
@@ -790,9 +761,10 @@ void Dbacc::releaseFragResources(Signal* signal, Uint32 fragIndex)
     DynArr256 dir(directoryPoolPtr, regFragPtr.p->directory);
     dir.init(iter);
     signal->theData[0] = ZREL_DIR;
-    signal->theData[1] = regFragPtr.i;
-    memcpy(&signal->theData[2], &iter, sizeof(iter));
-    sendSignal(reference(), GSN_CONTINUEB, signal, 2 + sizeof(iter) / 4, JBB);
+    signal->theData[1] = regFragPtr.p->fragmentid;
+    signal->theData[2] = regFragPtr.p->myTableId;
+    memcpy(&signal->theData[3], &iter, sizeof(iter));
+    sendSignal(reference(), GSN_CONTINUEB, signal, 3 + sizeof(iter) / 4, JBB);
   } else {
     jam();
     {
@@ -811,12 +783,14 @@ void Dbacc::releaseFragResources(Signal* signal, Uint32 fragIndex)
     }
     jam();
     Uint32 tab = regFragPtr.p->mytabptr;
+    Uint32 fragId = regFragPtr.p->fragmentid;
     releaseFragRecord(regFragPtr);
+    drop_fragment_from_table(tab, fragId);
     signal->theData[0] = ZREL_ROOT_FRAG;
     signal->theData[1] = tab;
     sendSignal(reference(), GSN_CONTINUEB, signal, 2, JBB);
   }//if
-  ndbassert(validatePageCount());
+  //ndbassert(validatePageCount());
 }//Dbacc::releaseFragResources()
 
 void Dbacc::verifyFragCorrect(FragmentrecPtr regFragPtr)const
@@ -827,14 +801,15 @@ void Dbacc::verifyFragCorrect(FragmentrecPtr regFragPtr)const
 void Dbacc::releaseDirResources(Signal* signal)
 {
   jam();
-  Uint32 fragIndex = signal->theData[1];
+  Uint32 fragId = signal->theData[1];
+  Uint32 tableId = signal->theData[2];
 
   DynArr256::ReleaseIterator iter;
-  memcpy(&iter, &signal->theData[2], sizeof(iter));
+  memcpy(&iter, &signal->theData[3], sizeof(iter));
 
   FragmentrecPtr regFragPtr;
-  regFragPtr.i = fragIndex;
-  ptrCheckGuard(regFragPtr, cfragmentsize, fragmentrec);
+  regFragPtr.i = getFragPtrI(tableId, fragId);
+  c_fragment_pool.getPtr(regFragPtr);
   verifyFragCorrect(regFragPtr);
 
   DynArr256::Head* directory;
@@ -882,35 +857,35 @@ void Dbacc::releaseDirResources(Signal* signal)
   if (ret != 0 || !cfreepages.isEmpty())
   {
     jam();
-    memcpy(&signal->theData[2], &iter, sizeof(iter));
-    sendSignal(reference(), GSN_CONTINUEB, signal, 2 + sizeof(iter) / 4, JBB);
+    memcpy(&signal->theData[3], &iter, sizeof(iter));
+    sendSignal(reference(), GSN_CONTINUEB, signal, 3 + sizeof(iter) / 4, JBB);
   }
   else
   {
     jam();
     signal->theData[0] = ZREL_FRAG;
-    sendSignal(reference(), GSN_CONTINUEB, signal, 2, JBB);
+    signal->theData[1] = fragId;
+    signal->theData[2] = tableId;
+    sendSignal(reference(), GSN_CONTINUEB, signal, 3, JBB);
   }
 }//Dbacc::releaseDirResources()
 
 void Dbacc::releaseFragRecord(FragmentrecPtr regFragPtr)
 {
-  regFragPtr.p->nextfreefrag = cfirstfreefrag;
   for (Uint32 i = 0; i < NUM_ACC_FRAGMENT_MUTEXES; i++)
   {
     NdbMutex_Deinit(&regFragPtr.p->acc_frag_mutex[i]);
   }
-  cfirstfreefrag = regFragPtr.i;
-  initFragGeneral(regFragPtr);
-  RSS_OP_FREE(cnoOfFreeFragrec);
+  c_fragment_pool.release(regFragPtr);
+  RSS_OP_FREE(cnoOfAllocatedFragrec);
 }//Dbacc::releaseFragRecord()
 
-/* -------------------------------------------------------------------------- */
-/* ADDFRAGTOTAB                                                               */
-/*       DESCRIPTION: PUTS A FRAGMENT ID AND A POINTER TO ITS RECORD INTO     */
-/*                                TABLE ARRRAY OF THE TABLE RECORD.           */
-/* -------------------------------------------------------------------------- */
-bool Dbacc::addfragtotab(Uint32 rootIndex, Uint32 fid) const
+/* ------------------------------------------------------------------------- */
+/* ADDFRAGTOTAB                                                              */
+/*       DESCRIPTION: PUTS A FRAGMENT ID AND A POINTER TO ITS RECORD INTO    */
+/*                                TABLE ARRRAY OF THE TABLE RECORD.          */
+/* ------------------------------------------------------------------------- */
+bool Dbacc::addfragtotab(Uint64 rootIndex, Uint32 fid) const
 {
   for (Uint32 i = 0; i < NDB_ARRAY_SIZE(tabptr.p->fragholder); i++) {
     jam();
@@ -924,32 +899,47 @@ bool Dbacc::addfragtotab(Uint32 rootIndex, Uint32 fid) const
   return false;
 }//Dbacc::addfragtotab()
 
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
-/*                                                                                   */
-/*       END OF ADD/DELETE FRAGMENT MODULE                                           */
-/*                                                                                   */
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
-/*                                                                                   */
-/*       CONNECTION MODULE                                                           */
-/*                                                                                   */
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
-/* ******************--------------------------------------------------------------- */
-/* ACCSEIZEREQ                                           SEIZE REQ                   */
-/*                                                    SENDER: LQH,    LEVEL B        */
-/*          ENTER ACCSEIZEREQ WITH                                                   */
-/*                    TUSERPTR ,                     CONECTION PTR OF LQH            */
-/*                    TUSERBLOCKREF                  BLOCK REFERENCE OF LQH          */
-/* ******************--------------------------------------------------------------- */
-/* ******************--------------------------------------------------------------- */
-/* ACCSEIZEREQ                                           SEIZE REQ                   */
-/* ******************------------------------------+                                 */
+void Dbacc::drop_fragment_from_table(Uint32 tableId, Uint32 fragId)
+{
+  tabptr.i = tableId;
+  ptrCheckGuard(tabptr, ctablesize, tabrec);
+  for (Uint32 i = 0; i < NDB_ARRAY_SIZE(tabptr.p->fragholder); i++) {
+    jam();
+    if (tabptr.p->fragholder[i] == fragId) {
+      jam();
+      tabptr.p->fragholder[i] = RNIL;
+      tabptr.p->fragptrholder[i] = RNIL64;
+      return;
+    }//if
+  }//for
+}
+
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/*                                                                           */
+/*       END OF ADD/DELETE FRAGMENT MODULE                                   */
+/*                                                                           */
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/*                                                                           */
+/*       CONNECTION MODULE                                                   */
+/*                                                                           */
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* ******************------------------------------------------------------- */
+/* ACCSEIZEREQ                                           SEIZE REQ           */
+/*                                                    SENDER: LQH,    LEVEL B*/
+/*          ENTER ACCSEIZEREQ WITH                                           */
+/*                    TUSERPTR ,                     CONECTION PTR OF LQH    */
+/*                    TUSERBLOCKREF                  BLOCK REFERENCE OF LQH  */
+/* ******************------------------------------------------------------- */
+/* ******************------------------------------------------------------- */
+/* ACCSEIZEREQ                                           SEIZE REQ           */
+/* ******************------------------------------+                         */
 /*   SENDER: LQH,    LEVEL B       */
 void Dbacc::execACCSEIZEREQ(Signal* signal) 
 {
@@ -1125,13 +1115,13 @@ void Dbacc::sendAcckeyconf(Signal* signal) const
 /* ******************--------------------------------------------------------------- */
 void Dbacc::execACCKEYREQ(Signal* signal,
                           Uint32 opPtrI,
-                          Dbacc::Operationrec *opPtrP) 
+                          Dbacc::Operationrec *opPtrP,
+                          Uint64 fragPtrI)
 {
   jamEntryDebug();
   AccKeyReq* const req = reinterpret_cast<AccKeyReq*>(&signal->theData[0]);
-  fragrecptr.i = req->fragmentPtr;        /* FRAGMENT RECORD POINTER         */
-  ndbrequire(fragrecptr.i < cfragmentsize);
-  ptrAss(fragrecptr, fragmentrec);
+  fragrecptr.i = fragPtrI;
+  c_fragment_pool.getPtr(fragrecptr);
   operationRecPtr.i = opPtrI;
   operationRecPtr.p = opPtrP;
   initOpRec(req, signal->getLength());
@@ -1579,7 +1569,7 @@ upgrade:
   {
     FragmentrecPtr frp;
     frp.i = nextOp.p->fragptr;
-    ptrCheckGuard(frp, cfragmentsize, fragmentrec);
+    c_fragment_pool.getPtr(frp);
     
     frp.p->m_lockStats.wait_ok(((nextbits & 
                                  Operationrec::OP_LOCK_MODE) 
@@ -1645,7 +1635,7 @@ conf:
   {
     jam();
     fragrecptr.i = nextOp.p->fragptr;
-    ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+    c_fragment_pool.getPtr(fragrecptr);
     
     sendAcckeyconf(signal);
     sendSignal(nextOp.p->userblockref, GSN_ACCKEYCONF, 
@@ -2579,7 +2569,7 @@ void Dbacc::execACCMINUPDATE(Signal* signal,
 
   if ((opbits & Operationrec::OP_STATE_MASK) == Operationrec::OP_STATE_RUNNING)
   {
-    ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+    c_fragment_pool.getPtr(fragrecptr);
     c_page8_pool.getPtr(ulkPageidptr);
     arrGuard(tulkLocalPtr, 2048);
     /**
@@ -2625,7 +2615,7 @@ Dbacc::removerow(Uint32 opPtrI, const Local_key* key)
   operationRecPtr.p->m_op_bits = opbits;
 
 #if defined(VM_TRACE) || defined(ERROR_INSERT)
-  ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+  c_fragment_pool.getPtr(fragrecptr);
   ndbrequire(operationRecPtr.p->localdata.m_page_no == key->m_page_no);
   ndbrequire(operationRecPtr.p->localdata.m_page_idx == key->m_page_idx);
 #endif
@@ -2651,7 +2641,7 @@ void Dbacc::execACC_COMMITREQ(Signal* signal,
   Uint32 opbits = operationRecPtr.p->m_op_bits;
   fragrecptr.i = operationRecPtr.p->fragptr;
   Toperation = opbits & Operationrec::OP_MASK;
-  ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+  c_fragment_pool.getPtr(fragrecptr);
   ndbrequire(Magic::check_ptr(operationRecPtr.p));
   commitOperation(signal);
   ndbassert(operationRecPtr.i == tmp);
@@ -2677,7 +2667,8 @@ void Dbacc::execACC_COMMITREQ(Signal* signal,
 	jam();
 	fragrecptr.p->slack += fragrecptr.p->elementLength;
 #ifdef ERROR_INSERT
-        if (force_expand_shrink || fragrecptr.p->slack > fragrecptr.p->slackCheck)
+        if (force_expand_shrink || fragrecptr.p->slack >
+                                   fragrecptr.p->slackCheck)
 #else
         if (fragrecptr.p->slack > fragrecptr.p->slackCheck)
 #endif
@@ -2687,9 +2678,10 @@ void Dbacc::execACC_COMMITREQ(Signal* signal,
             if (!fragrecptr.p->expandOrShrinkQueued)
             {
 	      jam();
-	      signal->theData[0] = fragrecptr.i;
+	      signal->theData[0] = fragrecptr.p->fragmentid;
+	      signal->theData[1] = fragrecptr.p->myTableId;
               fragrecptr.p->expandOrShrinkQueued = true;
-              sendSignal(reference(), GSN_SHRINKCHECK2, signal, 1, JBB);
+              sendSignal(reference(), GSN_SHRINKCHECK2, signal, 2, JBB);
 	    }//if
 	  }//if
 	}//if
@@ -2708,9 +2700,10 @@ void Dbacc::execACC_COMMITREQ(Signal* signal,
         if (!fragrecptr.p->expandOrShrinkQueued)
         {
 	  jam();
-	  signal->theData[0] = fragrecptr.i;
+	  signal->theData[0] = fragrecptr.p->fragmentid;
+          signal->theData[1] = fragrecptr.p->myTableId;
           fragrecptr.p->expandOrShrinkQueued = true;
-          sendSignal(reference(), GSN_EXPANDCHECK2, signal, 1, JBB);
+          sendSignal(reference(), GSN_EXPANDCHECK2, signal, 2, JBB);
 	}//if
       }//if
     }
@@ -2749,7 +2742,7 @@ void Dbacc::execACC_ABORTREQ(Signal* signal,
   {
     jam();
     ndbassert(!m_is_query_block);
-    ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+    c_fragment_pool.getPtr(fragrecptr);
     abortOperation(signal);
   }
   
@@ -2792,19 +2785,8 @@ void Dbacc::execACC_LOCKREQ(Signal* signal)
     tabptr.i = req->tableId;
     ptrCheckGuard(tabptr, ctablesize, tabrec);
     // find fragment (TUX will know it)
-    if (req->fragPtrI == RNIL) {
-      for (Uint32 i = 0; i < NDB_ARRAY_SIZE(tabptr.p->fragholder); i++) {
-        jam();
-        if (tabptr.p->fragholder[i] == req->fragId){
-	  jam();
-	  req->fragPtrI = tabptr.p->fragptrholder[i];
-	  break;
-	}
-      }
-    }
-    fragrecptr.i = req->fragPtrI;
-    ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
-    ndbrequire(req->fragId == fragrecptr.p->myfid);
+    fragrecptr.i = getFragPtrI(tabptr.i, req->fragId);
+    c_fragment_pool.getPtr(fragrecptr);
     // caller must be explicit here
     ndbrequire(req->accOpPtr == RNIL);
     // seize operation to hold the lock
@@ -2858,7 +2840,8 @@ void Dbacc::execACC_LOCKREQ(Signal* signal)
       signal->setLength(AccKeyReq::SignalLength_localKey);
       execACCKEYREQ(signal,
                     operationRecPtr.i,
-                    operationRecPtr.p);
+                    operationRecPtr.p,
+                    fragrecptr.i);
         /* keyreq invalid, signal now contains return value */
       // translate the result
       if (signal->theData[0] < RNIL)
@@ -2931,14 +2914,14 @@ void Dbacc::execACC_LOCKREQ(Signal* signal)
   ndbabort();
 }
 
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
-/*                                                                                   */
-/*       END OF EXECUTE OPERATION MODULE                                             */
-/*                                                                                   */
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/*                                                                           */
+/*       END OF EXECUTE OPERATION MODULE                                     */
+/*                                                                           */
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
 
 /**
  * HASH TABLE MODULE
@@ -5068,7 +5051,7 @@ Dbacc::abortSerieQueueOperation(Signal* signal, OperationrecPtr opPtr)
   {
     FragmentrecPtr frp;
     frp.i = opPtr.p->fragptr;
-    ptrCheckGuard(frp, cfragmentsize, fragmentrec);
+    c_fragment_pool.getPtr(frp);
 
     frp.p->m_lockStats.wait_fail((opbits & 
                                   Operationrec::OP_LOCK_MODE) 
@@ -5841,7 +5824,7 @@ Dbacc::startNew(Signal* signal, OperationrecPtr newOwner)
   {
     FragmentrecPtr frp;
     frp.i = newOwner.p->fragptr;
-    ptrCheckGuard(frp, cfragmentsize, fragmentrec);
+    c_fragment_pool.getPtr(frp);
     frp.p->m_lockStats.wait_ok((opbits & Operationrec::OP_LOCK_MODE) 
                                != ZREADLOCK,
                                operationRecPtr.p->m_lockTime,
@@ -6201,9 +6184,10 @@ void Dbacc::execEXPANDCHECK2(Signal* signal)
     jam();
     return;
   }
-
-  fragrecptr.i = signal->theData[0];
-  ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+  Uint32 fragId = signal->theData[0];
+  Uint32 tableId = signal->theData[1];
+  fragrecptr.i = getFragPtrI(tableId, fragId);
+  c_fragment_pool.getPtr(fragrecptr);
   fragrecptr.p->expandOrShrinkQueued = false;
 #ifdef ERROR_INSERT
   bool force_expand_shrink = false;
@@ -6265,7 +6249,7 @@ void Dbacc::execEXPANDCHECK2(Signal* signal)
   Uint32 splitBucket;
   Uint32 receiveBucket;
 
-  bool doSplit = fragrecptr.p->level.getSplitBucket(splitBucket, receiveBucket);
+  bool doSplit = fragrecptr.p->level.getSplitBucket(splitBucket,receiveBucket);
 
   // Check that splitted bucket is not currently scanned
   if (doSplit && checkScanExpand(splitBucket) == 1) {
@@ -6279,13 +6263,12 @@ void Dbacc::execEXPANDCHECK2(Signal* signal)
   c_tup->prepare_tab_pointers_acc(fragrecptr.p->myTableId,
                                   fragrecptr.p->myfid);
   acquire_frag_mutex_bucket(fragrecptr.p, splitBucket);
-  /*--------------------------------------------------------------------------*/
-  /*       WE START BY FINDING THE PAGE, THE PAGE INDEX AND THE PAGE DIRECTORY*/
-  /*       OF THE NEW BUCKET WHICH SHALL RECEIVE THE ELEMENT WHICH HAVE A 1 IN*/
-  /*       THE NEXT HASH BIT. THIS BIT IS USED IN THE SPLIT MECHANISM TO      */
-  /*       DECIDE WHICH ELEMENT GOES WHERE.                                   */
-  /*--------------------------------------------------------------------------*/
-
+  /*-------------------------------------------------------------------------*/
+  /*      WE START BY FINDING THE PAGE, THE PAGE INDEX AND THE PAGE DIRECTORY*/
+  /*      OF THE NEW BUCKET WHICH SHALL RECEIVE THE ELEMENT WHICH HAVE A 1 IN*/
+  /*      THE NEXT HASH BIT. THIS BIT IS USED IN THE SPLIT MECHANISM TO      */
+  /*      DECIDE WHICH ELEMENT GOES WHERE.                                   */
+  /*-------------------------------------------------------------------------*/
   Uint32 expDirInd = fragrecptr.p->getPageNumber(receiveBucket);
   Page8Ptr expPageptr;
   if (fragrecptr.p->getPageIndex(receiveBucket) == 0)
@@ -6377,13 +6360,14 @@ void Dbacc::endofexpLab(Signal* signal)
   {
     jam();
     /* IT MEANS THAT IF SLACK < ZERO */
-    /* --------------------------------------------------------------------------------- */
-    /*       IT IS STILL NECESSARY TO EXPAND THE FRAGMENT EVEN MORE. START IT FROM HERE  */
-    /*       WITHOUT WAITING FOR NEXT COMMIT ON THE FRAGMENT.                            */
-    /* --------------------------------------------------------------------------------- */
-    signal->theData[0] = fragrecptr.i;
+    /* --------------------------------------------------------------------- */
+    /* IT IS STILL NECESSARY TO EXPAND THE FRAGMENT EVEN MORE. START IT FROM */
+    /* HERE WITHOUT WAITING FOR NEXT COMMIT ON THE FRAGMENT.                 */
+    /* --------------------------------------------------------------------- */
+    signal->theData[0] = fragrecptr.p->fragmentid;
+    signal->theData[1] = fragrecptr.p->myTableId;
     fragrecptr.p->expandOrShrinkQueued = true;
-    sendSignal(reference(), GSN_EXPANDCHECK2, signal, 1, JBB);
+    sendSignal(reference(), GSN_EXPANDCHECK2, signal, 2, JBB);
   }//if
   return;
 }//Dbacc::endofexpLab()
@@ -6401,7 +6385,8 @@ LHBits32 Dbacc::getElementHash(OperationrecPtr& oprec)
   jam();
   ndbassert(!oprec.isNull());
 
-  // Only calculate hash value if operation does not already have a complete hash value
+  // Only calculate hash value if operation does not already have a
+  // complete hash value
   if (oprec.p->hashValue.valid_bits() < fragrecptr.p->MAX_HASH_VALUE_BITS)
   {
     jam();
@@ -6975,8 +6960,10 @@ Uint32 Dbacc::checkScanShrink(Uint32 sourceBucket, Uint32 destBucket)
 void Dbacc::execSHRINKCHECK2(Signal* signal) 
 {
   jamEntry();
-  fragrecptr.i = signal->theData[0];
-  ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+  Uint32 fragId = signal->theData[0];
+  Uint32 tableId = signal->theData[1];
+  fragrecptr.i = getFragPtrI(tableId, fragId);
+  c_fragment_pool.getPtr(fragrecptr);
   fragrecptr.p->expandOrShrinkQueued = false;
 #ifdef ERROR_INSERT
   bool force_expand_shrink = false;
@@ -7275,10 +7262,11 @@ void Dbacc::endofshrinkbucketLab(Signal* signal)
 	/*       SHRINKING BELOW 2^K - 1 (NOW 63). THIS WAS A BUG THAT  */
 	/*       WAS REMOVED 2000-05-12.                                */
 	/*--------------------------------------------------------------*/
-        signal->theData[0] = fragrecptr.i;
+        signal->theData[0] = fragrecptr.p->fragmentid;
+        signal->theData[1] = fragrecptr.p->myTableId;
         ndbrequire(!fragrecptr.p->expandOrShrinkQueued);
         fragrecptr.p->expandOrShrinkQueued = true;
-        sendSignal(reference(), GSN_SHRINKCHECK2, signal, 1, JBB);
+        sendSignal(reference(), GSN_SHRINKCHECK2, signal, 2, JBB);
       }//if
     }//if
   }//if
@@ -7672,7 +7660,7 @@ void Dbacc::execNEXT_SCANREQ(Signal* signal)
      * --------------------------------------------------------------------- */
     ndbrequire(oprec_pool.getUncheckedPtrRW(operationRecPtr));
     fragrecptr.i = operationRecPtr.p->fragptr;
-    ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+    c_fragment_pool.getPtr(fragrecptr);
     ndbrequire(Magic::check_ptr(operationRecPtr.p));
     if (!scanPtr.p->scanReadCommittedFlag) {
       commitOperation(signal);
@@ -7694,7 +7682,7 @@ void Dbacc::execNEXT_SCANREQ(Signal* signal)
   case NextScanReq::ZSCAN_CLOSE:
     jam();
     fragrecptr.i = scanPtr.p->activeLocalFrag;
-    ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+    c_fragment_pool.getPtr(fragrecptr);
     ndbassert(fragrecptr.p->activeScanMask & scanPtr.p->scanMask);
     /* ---------------------------------------------------------------------
      * THE SCAN PROCESS IS FINISHED. RELOCK ALL LOCKED EL. 
@@ -8002,7 +7990,7 @@ void Dbacc::releaseScanLab(Signal* signal)
   releaseAndAbortLockedOps(signal);
 
   fragrecptr.i = scanPtr.p->activeLocalFrag;
-  ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+  c_fragment_pool.getPtr(fragrecptr);
   ndbassert(fragrecptr.p->activeScanMask & scanPtr.p->scanMask);
 
   /**
@@ -8070,7 +8058,7 @@ void Dbacc::releaseAndCommitActiveOps(Signal* signal)
     ndbrequire(oprec_pool.getValidPtr(operationRecPtr));
     trsoOperPtr.i = operationRecPtr.p->nextOp;
     fragrecptr.i = operationRecPtr.p->fragptr;
-    ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+    c_fragment_pool.getPtr(fragrecptr);
     if (!scanPtr.p->scanReadCommittedFlag) {
       jam();
       if ((operationRecPtr.p->m_op_bits & Operationrec::OP_STATE_MASK) ==
@@ -8101,7 +8089,7 @@ void Dbacc::releaseAndCommitQueuedOps(Signal* signal)
     ndbrequire(oprec_pool.getValidPtr(operationRecPtr));
     trsoOperPtr.i = operationRecPtr.p->nextOp;
     fragrecptr.i = operationRecPtr.p->fragptr;
-    ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+    c_fragment_pool.getPtr(fragrecptr);
     if (!scanPtr.p->scanReadCommittedFlag) {
       jam();
       if ((operationRecPtr.p->m_op_bits & Operationrec::OP_STATE_MASK) ==
@@ -8131,7 +8119,7 @@ void Dbacc::releaseAndAbortLockedOps(Signal* signal) {
     ndbrequire(oprec_pool.getValidPtr(operationRecPtr));
     trsoOperPtr.i = operationRecPtr.p->nextOp;
     fragrecptr.i = operationRecPtr.p->fragptr;
-    ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+    c_fragment_pool.getPtr(fragrecptr);
     if (!scanPtr.p->scanReadCommittedFlag) {
       jam();
       abortOperation(signal);
@@ -8174,7 +8162,7 @@ void Dbacc::execACC_CHECK_SCAN(Signal* signal)
     ndbrequire(oprec_pool.getValidPtr(operationRecPtr));
     takeOutReadyScanQueue();
     fragrecptr.i = operationRecPtr.p->fragptr;
-    ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+    c_fragment_pool.getPtr(fragrecptr);
 
     /* Scan op that had to wait for a lock is now runnable */
     fragrecptr.p->m_lockStats.wait_ok(scanPtr.p->scanLockMode != ZREADLOCK,
@@ -8308,7 +8296,7 @@ void Dbacc::execACC_CHECK_SCAN(Signal* signal)
   }//if
 
   fragrecptr.i = scanPtr.p->activeLocalFrag;
-  ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+  c_fragment_pool.getPtr(fragrecptr);
   ndbassert(fragrecptr.p->activeScanMask & scanPtr.p->scanMask);
   checkNextBucketLab(signal);
   return;
@@ -9042,28 +9030,38 @@ void Dbacc::takeOutReadyScanQueue() const
   }//if
 }//Dbacc::takeOutReadyScanQueue()
 
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
-/*                                                                                   */
-/*       END OF SCAN MODULE                                                          */
-/*                                                                                   */
-/* --------------------------------------------------------------------------------- */
-/* --------------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
+/*                                                                           */
+/*       END OF SCAN MODULE                                                  */
+/*                                                                           */
+/* ------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------- */
 
-bool Dbacc::getfragmentrec(FragmentrecPtr& rootPtr, Uint32 fid)
+bool Dbacc::getfragmentrec(FragmentrecPtr& rootPtr,
+                           Uint32 fid)
 {
-  for (Uint32 i = 0; i < NDB_ARRAY_SIZE(tabptr.p->fragholder); i++) {
+  for (Uint32 i = 0; i < NDB_ARRAY_SIZE(tabptr.p->fragholder); i++)
+  {
     jam();
     if (tabptr.p->fragholder[i] == fid) {
       jam();
-      fragrecptr.i = tabptr.p->fragptrholder[i];
-      ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
+      rootPtr.i = tabptr.p->fragptrholder[i];
+      c_fragment_pool.getPtr(rootPtr);
       return true;
     }//if
   }//for
   return false;
-}//Dbacc::getrootfragmentrec()
+}
+
+Uint64 Dbacc::getFragPtrI(Uint32 tableId, Uint32 fragId)
+{
+  tabptr.i = tableId;
+  ptrCheckGuard(tabptr, ctablesize, tabrec);
+  getfragmentrec(fragrecptr, fragId);
+  return fragrecptr.i;
+}
 
 /* --------------------------------------------------------------------------------- */
 /* INIT_OVERPAGE                                                                     */
@@ -9331,6 +9329,7 @@ void Dbacc::releasePage(Page8Ptr rpPageptr,
   ndbassert(pages.getCount() <= cpageCount);
 }//Dbacc::releasePage()
 
+#if 0
 bool Dbacc::validatePageCount() const
 {
   jam();
@@ -9343,37 +9342,31 @@ bool Dbacc::validatePageCount() const
   }
   return pageCount==cnoOfAllocatedPages;
 }//Dbacc::validatePageCount()
+#endif
 
-
-Uint64 Dbacc::getLinHashByteSize(Uint32 fragId) const
+Uint64 Dbacc::getLinHashByteSize(Uint64 fragPtrI) const
 {
-  ndbassert(validatePageCount());
-  FragmentrecPtr fragPtr(NULL, fragId);
-  ptrCheck(fragPtr, cfragmentsize, fragmentrec);
-  if (unlikely(fragPtr.p == NULL))
-  {
-    jam();
-    ndbassert(false);
-    return 0;
-  }
-  else
-  {
-    jam();
-    ndbassert(fragPtr.p->fragState == ACTIVEFRAG);
-    return fragPtr.p->m_noOfAllocatedPages * static_cast<Uint64>(sizeof(Page8));
-  }
+  jam();
+  //ndbassert(validatePageCount());
+  FragmentrecPtr fragPtr;
+  fragPtr.i = fragPtrI;
+  c_fragment_pool.getPtr(fragPtr);
+  ndbassert(fragPtr.p->fragState == ACTIVEFRAG);
+  return fragPtr.p->m_noOfAllocatedPages * static_cast<Uint64>(sizeof(Page8));
 }
 
-/* --------------------------------------------------------------------------------- */
-/* SEIZE    FRAGREC                                                                  */
-/* --------------------------------------------------------------------------------- */
-void Dbacc::seizeFragrec()
+/* ------------------------------------------------------------------------- */
+/* SEIZE    FRAGREC                                                          */
+/* ------------------------------------------------------------------------- */
+bool Dbacc::seizeFragrec()
 {
-  RSS_OP_ALLOC(cnoOfFreeFragrec);
-  fragrecptr.i = cfirstfreefrag;
-  ptrCheckGuard(fragrecptr, cfragmentsize, fragmentrec);
-  cfirstfreefrag = fragrecptr.p->nextfreefrag;
-  fragrecptr.p->nextfreefrag = RNIL;
+  bool succ = c_fragment_pool.seize(fragrecptr);
+  if (succ)
+  {
+    RSS_OP_ALLOC(cnoOfAllocatedFragrec);
+    fragrecptr.p = new (fragrecptr.p) Fragmentrec();
+  }
+  return succ;
 }//Dbacc::seizeFragrec()
 
 /** 
@@ -9567,7 +9560,7 @@ void Dbacc::execDBINFO_SCANREQ(Signal *signal)
             jam();
             FragmentrecPtr frp;
             frp.i = tabPtr.p->fragptrholder[f];
-            ptrCheckGuard(frp, cfragmentsize, fragmentrec);
+            c_fragment_pool.getPtr(frp);
             
             const Fragmentrec::LockStats& ls = frp.p->m_lockStats;
             
@@ -9662,7 +9655,7 @@ void Dbacc::execDBINFO_SCANREQ(Signal *signal)
 
         FragmentrecPtr fp;
         fp.i = opRecPtr.p->fragptr;
-        ptrCheckGuard(fp, cfragmentsize, fragmentrec);
+        c_fragment_pool.getPtr(fp);
 
         const Uint32 tableId = fp.p->myTableId;
         const Uint32 fragId = fp.p->myfid;
@@ -9786,7 +9779,7 @@ Dbacc::execDUMP_STATE_ORD(Signal* signal)
     g_eventLogger->info("Dbacc::ScanRec[%d]: state=%d, transid(0x%x, 0x%x)",
 	      scanPtr.i, scanPtr.p->scanState,scanPtr.p->scanTrid1,
 	      scanPtr.p->scanTrid2);
-    g_eventLogger->info("activeLocalFrag=%d, nextBucketIndex=%d",
+    g_eventLogger->info("activeLocalFrag=%lld, nextBucketIndex=%d",
 	      scanPtr.p->activeLocalFrag,
 	      scanPtr.p->nextBucketIndex);
     g_eventLogger->info("firstActOp=%d firstLockedOp=%d",
@@ -9868,7 +9861,7 @@ Dbacc::execDUMP_STATE_ORD(Signal* signal)
     infoEvent("elementPage=%d, elementPointer=%d ",
 	      tmpOpPtr.p->elementPage, 
 	      tmpOpPtr.p->elementPointer);
-    infoEvent("fid=%d, fragptr=%d ",
+    infoEvent("fid=%d, fragptr=%lld ",
               tmpOpPtr.p->fid, tmpOpPtr.p->fragptr);
     infoEvent("hashValue=%d", tmpOpPtr.p->hashValue.pack());
     infoEvent("nextLockOwnerOp=%d, nextOp=%d, nextParallelQue=%d ",
@@ -9962,13 +9955,13 @@ Dbacc::execDUMP_STATE_ORD(Signal* signal)
 
   if (signal->theData[0] == DumpStateOrd::SchemaResourceSnapshot)
   {
-    RSS_OP_SNAPSHOT_SAVE(cnoOfFreeFragrec);
+    RSS_OP_SNAPSHOT_SAVE(cnoOfAllocatedFragrec);
     return;
   }
 
   if (signal->theData[0] == DumpStateOrd::SchemaResourceCheckLeak)
   {
-    RSS_OP_SNAPSHOT_CHECK(cnoOfFreeFragrec);
+    RSS_OP_SNAPSHOT_CHECK(cnoOfAllocatedFragrec);
     return;
   }
 #if defined(VM_TRACE) || defined(ERROR_INSERT)
@@ -9999,11 +9992,12 @@ Dbacc::execDUMP_STATE_ORD(Signal* signal)
 }//Dbacc::execDUMP_STATE_ORD()
 
 Uint32
-Dbacc::getL2PMapAllocBytes(Uint32 fragId) const
+Dbacc::getL2PMapAllocBytes(Uint64 fragPtrI) const
 {
   jam();
-  FragmentrecPtr fragPtr(NULL, fragId);
-  ptrCheckGuard(fragPtr, cfragmentsize, fragmentrec);
+  FragmentrecPtr fragPtr;
+  fragPtr.i = fragPtrI;
+  c_fragment_pool.getPtr(fragPtr);
   return fragPtr.p->directory.getByteSize();
 }
 

@@ -1,5 +1,6 @@
 /*
    Copyright (c) 2003, 2020, Oracle and/or its affiliates.
+   Copyright (c) 2020, iClaustron AB and/or its affiliates.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -427,7 +428,7 @@ static const char* const jamFileNames[] =
    "ndbd_malloc_impl.hpp",               // 291
    "ArrayPool.hpp",                      // 292
    "Mutex.cpp",                          // 293
-   "WOPool.cpp",                         // 294
+   "WOPool.cpp",                         // 294 DELETED FILE
    "test_context.hpp",                   // 295
    "ndbd_malloc_impl.cpp",               // 296
    "mt_thr_config.cpp",                  // 297
@@ -436,7 +437,7 @@ static const char* const jamFileNames[] =
    "LongSignal_mt.cpp",                  // 300
    "Configuration.cpp",                  // 301
    "WaitQueue.hpp",                      // 302 DELETED FILE
-   "WOPool.hpp",                         // 303
+   "WOPool.hpp",                         // 303 DELETED FILE
    "CountingPool.cpp",                   // 304
    "TransporterCallbackKernel.hpp",      // 305
    "NdbdSuperPool.hpp",                  // 306 DELETED FILE
@@ -674,6 +675,9 @@ static const char* const jamFileNames[] =
    "QRestore.cpp",                       // 538
    "QRestoreProxy.hpp",                  // 539
    "QRestoreProxy.cpp",                  // 540
+   "RWPool64.hpp",                       // 541
+   "IntrusiveList64.hpp",                // 542
+   "IntrusiveList64.cpp",                // 543
    };
 
 bool 

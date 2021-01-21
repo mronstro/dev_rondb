@@ -27,7 +27,8 @@
 
 #include "ndb_version.h"  // Limits might depend on NDB version
 
-#define RNIL    0xffffff00
+#define RNIL    Uint32(0xffffff00)
+#define RNIL64  Uint64(0xffffffffffffff00)
 
 /**
  * Note that actual value = MAX_NODES - 1,
@@ -399,7 +400,7 @@
 
 #define MAX_UNDO_DATA            20 + MAX_TUPLE_SIZE_IN_WORDS
 // Max. number of pending undo records allowed per LDM
-#define MAX_PENDING_UNDO_RECORDS 100
+#define MAX_PENDING_UNDO_RECORDS 1000
 
 // Maximum handling of DROP_TRIG_REQs in parallel by LocalProxy
 #define NDB_MAX_PROXY_DROP_TRIG_IMPL_REQ 21
